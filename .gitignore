@@ -1,0 +1,18 @@
+node_modules/
+package-lock.json
+yarn.lock
+
+# Logs
+*.log
+debug.log
+
+# Temporary files
+tmp/
+temp/
+*.swp
+*.swo
+*.DS_Store
+
+# Optional
+.env
+# config.js
