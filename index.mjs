@@ -12,29 +12,29 @@ const app = fastify({
   logger: true,
 });
 
-const REGION = process.env.REGION || "us-east-2";
-const BUCKET = process.env.BUCKET;
+const REGION = process.env.REGION;
+const BUCKET = process.env.LANGUAGES_BUCKET;
 
 // AWS Configuration (initialize once and reuse)
 const s3Client = new S3Client({ region: REGION });
-const s3BucketName = BUCKET;
+const s3Bucketfile = BUCKET;
 
 // Check if BUCKET is set
-if (!s3BucketName) {
+if (!s3Bucketfile) {
   console.error("BUCKET environment variable is not set.");
   process.exit(1);
 }
 
 // Function to get the image URL
-const getS3ObjectUrl = async (image) => {
-  const s3Key = image;
+const getS3ObjectUrl = async (file) => {
+  const s3Key = file;
   try {
-    const command = new GetObjectCommand({ Bucket: s3BucketName, Key: s3Key });
+    const command = new GetObjectCommand({ Bucket: s3Bucketfile, Key: s3Key });
     const url = await getSignedUrl(s3Client, command, { expiresIn: 60 });
     return url;
   } catch (error) {
     console.error("Error generating image URL:", error);
-    throw new Error("Failed to generate image URL");
+    throw new Error("Failed to generate signed URL");
   }
 };
 
@@ -48,37 +48,41 @@ app.get("/health", async (request, reply) => {
 
 app.get("/", async (request, reply) => {
   return {
-    message: "Welcome to the VBytes API",
+    message: "Welcome to the VBytes Language Dataset API",
     version: "1.0.0",
     routes: [
       { method: "GET", path: "/health", description: "Health check" },
-      { method: "GET", path: "/images/image", description: "Get image URL" }, // CHANGED PATH
+      {
+        method: "GET",
+        path: "/languages",
+        description: "Get List of languages",
+      }, // CHANGED PATH
     ],
   };
 });
 
 // Route to get the image URL  // CHANGED PATH
-app.get("/images/image", async (request, reply) => {
+app.get("/languages", async (request, reply) => {
   try {
-    const { name } = request.query; // Changed to name
-    if (!name) {
+    const { file } = request.query; // Changed to file
+    if (!file) {
       return reply.status(400).send({
         error: "Missing image parameter",
-        message: "The 'name' query parameter is required.", // Changed message
+        message: "The 'file' query parameter is required.", // Changed message
       });
     }
-    const imageUrl = await getS3ObjectUrl(name);
-    if (!imageUrl) {
+    const fileUrl = await getS3ObjectUrl(file);
+    if (!fileUrl) {
       return reply.status(404).send({
-        error: "image not found",
-        message: `No image found for image ${name}`, // Changed message
+        error: "File not found",
+        message: `No File found for ${file}`, // Changed message
       });
     }
-    reply.redirect(imageUrl, 302);
+    reply.redirect(fileUrl, 302);
   } catch (error) {
-    console.error("Error in /images/image route:", error); // CHANGED LOG
+    console.error("Error in /languages route:", error); // CHANGED LOG
     reply.status(500).send({
-      error: `Failed to retrieve image URL for image ${request.query.name}`, // Changed message
+      error: `Failed to retrieve file URL for ${request.query.file}`, // Changed message
       message: error.message,
     });
   }
