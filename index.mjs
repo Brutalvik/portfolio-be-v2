@@ -9,7 +9,7 @@ dotenv.config();
 const app = fastify({ logger: true });
 
 // CloudFront configuration from environment variables
-const CLOUDFRONT_DOMAIN = process.env.CLOUDFRONT_PDF_DOMAIN;
+const CLOUDFRONT_DOMAIN = process.env.CLOUDFRONT_COUNTRIES_DOMAIN;
 const CLOUDFRONT_KEY_PAIR_ID = process.env.CLOUDFRONT_KEY_PAIR_ID;
 const PRIVATE_KEY_PATH = "./cloudfront-private-key.pem";
 const EXPIRES_IN_SECONDS = 60;
