@@ -1,44 +1,37 @@
 import fastify from "fastify";
 import awsLambdaFastify from "@fastify/aws-lambda";
-import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import dotenv from "dotenv";
 
 // Load environment variables from .env file
 dotenv.config();
 
-// Create a Fastify instance (good to initialize once and reuse)
+// Create a Fastify instance
 const app = fastify({
   logger: true,
 });
 
 const REGION = process.env.REGION;
-const BUCKET = process.env.LANGUAGES_BUCKET;
+const S3_BUCKET_NAME = process.env.country - codes_BUCKET;
+const CLOUDFRONT_DOMAIN = process.env.CLOUDFRONT_DOMAIN;
 
-// AWS Configuration (initialize once and reuse)
-const s3Client = new S3Client({ region: REGION });
-const s3Bucketfile = BUCKET;
-
-// Check if BUCKET is set
-if (!s3Bucketfile) {
-  console.error("BUCKET environment variable is not set.");
+// Check if essential environment variables are set
+if (!S3_BUCKET_NAME) {
+  console.error("S3_BUCKET_NAME environment variable is not set.");
+  process.exit(1);
+}
+if (!CLOUDFRONT_DOMAIN) {
+  console.error("CLOUDFRONT_DOMAIN environment variable is not set.");
   process.exit(1);
 }
 
-// Function to get the image URL
-const getS3ObjectUrl = async (file) => {
-  const s3Key = file;
-  try {
-    const command = new GetObjectCommand({ Bucket: s3Bucketfile, Key: s3Key });
-    const url = await getSignedUrl(s3Client, command, { expiresIn: 60 });
-    return url;
-  } catch (error) {
-    console.error("Error generating image URL:", error);
-    throw new Error("Failed to generate signed URL");
-  }
+// Function to get the CloudFront URL for a file
+const getCloudFrontUrl = (fileKey) => {
+  const cleanFileKey = fileKey.startsWith("/") ? fileKey.substring(1) : fileKey;
+  // Construct the URL using the CloudFront domain and the S3 object key
+  return `${CLOUDFRONT_DOMAIN}/${cleanFileKey}`;
 };
 
-//Route for the root path
+// Route for the root path
 app.get("/health", async (request, reply) => {
   return {
     status: "ok",
@@ -54,35 +47,35 @@ app.get("/", async (request, reply) => {
       { method: "GET", path: "/health", description: "Health check" },
       {
         method: "GET",
-        path: "/languages",
-        description: "Get List of languages",
-      }, // CHANGED PATH
+        path: "/country-codes",
+        description: "Get List of country-codes (served via CloudFront)",
+      },
     ],
   };
 });
 
-// Route to get the image URL  // CHANGED PATH
-app.get("/languages", async (request, reply) => {
+// Route to get the file URL via CloudFront
+app.get("/country-codes", async (request, reply) => {
   try {
-    const { file } = request.query; // Changed to file
+    const { file } = request.query;
     if (!file) {
       return reply.status(400).send({
-        error: "Missing image parameter",
-        message: "The 'file' query parameter is required.", // Changed message
+        error: "Missing file parameter",
+        message:
+          "The 'file' query parameter is required (e.g., ?file=data.json).",
       });
     }
-    const fileUrl = await getS3ObjectUrl(file);
-    if (!fileUrl) {
-      return reply.status(404).send({
-        error: "File not found",
-        message: `No File found for ${file}`, // Changed message
-      });
-    }
+
+    const fileUrl = getCloudFrontUrl(file);
+
+    // Note: We cannot check if the file *exists* on S3 directly here without an S3 HEAD request,
+    // which would make this API slower. CloudFront will handle the 404 if the file is not found.
+    // So, we just redirect to the CloudFront URL.
     reply.redirect(fileUrl, 302);
   } catch (error) {
-    console.error("Error in /languages route:", error); // CHANGED LOG
+    console.error("Error in /country-codes route:", error);
     reply.status(500).send({
-      error: `Failed to retrieve file URL for ${request.query.file}`, // Changed message
+      error: `Failed to generate CloudFront URL for ${request.query.file}`,
       message: error.message,
     });
   }
