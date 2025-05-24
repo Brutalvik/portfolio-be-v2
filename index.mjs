@@ -1,96 +1,109 @@
 import fastify from "fastify";
 import awsLambdaFastify from "@fastify/aws-lambda";
+import { getSignedUrl } from "@aws-sdk/cloudfront-signer";
+import fs from "fs";
 import dotenv from "dotenv";
 
-// Load environment variables from .env file
 dotenv.config();
 
-// Create a Fastify instance
-const app = fastify({
-  logger: true,
-});
+const app = fastify({ logger: true });
 
-const REGION = process.env.REGION;
-const S3_BUCKET_NAME = process.env.country - codes_BUCKET;
-const CLOUDFRONT_DOMAIN = process.env.CLOUDFRONT_DOMAIN;
+// CloudFront configuration from environment variables
+const CLOUDFRONT_DOMAIN = process.env.CLOUDFRONT_PDF_DOMAIN;
+const CLOUDFRONT_KEY_PAIR_ID = process.env.CLOUDFRONT_KEY_PAIR_ID;
+const PRIVATE_KEY_PATH = "./cloudfront-private-key.pem";
+const EXPIRES_IN_SECONDS = 60;
 
-// Check if essential environment variables are set
-if (!S3_BUCKET_NAME) {
-  console.error("S3_BUCKET_NAME environment variable is not set.");
+// Load private key for signing CloudFront URLs
+let privateKey;
+try {
+  privateKey = fs.readFileSync(PRIVATE_KEY_PATH, "utf8");
+} catch (error) {
+  console.error(
+    `Error: Could not read private key from ${PRIVATE_KEY_PATH}.`,
+    error
+  );
+  if (process.env.NODE_ENV !== "production") process.exit(1);
+}
+
+// Environment variable validation
+if (!CLOUDFRONT_DOMAIN || !CLOUDFRONT_KEY_PAIR_ID || !privateKey) {
+  console.error("Missing CloudFront configuration environment variables.");
   process.exit(1);
 }
-if (!CLOUDFRONT_DOMAIN) {
-  console.error("CLOUDFRONT_DOMAIN environment variable is not set.");
-  process.exit(1);
-}
 
-// Function to get the CloudFront URL for a file
-const getCloudFrontUrl = (fileKey) => {
+/**
+ * Generates a CloudFront Signed URL.
+ */
+const generateSignedCloudFrontUrl = (fileKey) => {
   const cleanFileKey = fileKey.startsWith("/") ? fileKey.substring(1) : fileKey;
-  // Construct the URL using the CloudFront domain and the S3 object key
-  return `${CLOUDFRONT_DOMAIN}/${cleanFileKey}`;
+  const resourceUrl = `${CLOUDFRONT_DOMAIN}/${cleanFileKey}`;
+  const expirationDate = new Date(Date.now() + EXPIRES_IN_SECONDS * 1000);
+
+  try {
+    return getSignedUrl({
+      url: resourceUrl,
+      dateLessThan: expirationDate.toISOString(),
+      keyPairId: CLOUDFRONT_KEY_PAIR_ID,
+      privateKey: privateKey,
+    });
+  } catch (error) {
+    app.log.error("Error generating CloudFront signed URL:", error);
+    throw new Error("Failed to generate CloudFront signed URL.");
+  }
 };
 
-// Route for the root path
-app.get("/health", async (request, reply) => {
-  return {
-    status: "ok",
-    message: "API is healthy",
-  };
-});
+// --- API Routes ---
 
+// Health check
+app.get("/health", async (_, reply) =>
+  reply.status(200).send({ message: "API is Healthy", status: "ok" })
+);
+
+// Root endpoint with API info
 app.get("/", async (request, reply) => {
   return {
-    message: "Welcome to the VBytes Language Dataset API",
+    message: "Welcome to the VBytes Language Dataset and Country Codes API",
     version: "1.0.0",
     routes: [
       { method: "GET", path: "/health", description: "Health check" },
       {
         method: "GET",
-        path: "/country-codes",
-        description: "Get List of country-codes (served via CloudFront)",
+        path: "/countries?file=file.json",
+        description: "Get country data",
       },
     ],
   };
 });
 
-// Route to get the file URL via CloudFront
-app.get("/country-codes", async (request, reply) => {
+// Endpoint for country data
+app.get("/countries", async (request, reply) => {
+  const { file } = request.query;
+  if (!file)
+    return reply.status(400).send({ error: "Missing 'file' parameter" });
+
   try {
-    const { file } = request.query;
-    if (!file) {
-      return reply.status(400).send({
-        error: "Missing file parameter",
-        message:
-          "The 'file' query parameter is required (e.g., ?file=data.json).",
-      });
-    }
-
-    const fileUrl = getCloudFrontUrl(file);
-
-    // Note: We cannot check if the file *exists* on S3 directly here without an S3 HEAD request,
-    // which would make this API slower. CloudFront will handle the 404 if the file is not found.
-    // So, we just redirect to the CloudFront URL.
-    reply.redirect(fileUrl, 302);
+    const fileUrl = generateSignedCloudFrontUrl(file);
+    return reply.redirect(fileUrl, 302);
   } catch (error) {
-    console.error("Error in /country-codes route:", error);
-    reply.status(500).send({
-      error: `Failed to generate CloudFront URL for ${request.query.file}`,
+    request.log.error(
+      `Error processing /countries request for file: ${file}`,
+      error
+    );
+    return reply.status(500).send({
+      error: `Failed to retrieve file URL for ${file}`,
       message: error.message,
     });
   }
 });
 
-// Lambda handler (for deploying as a Lambda function)
+// --- AWS Lambda Handler ---
 export const handler = awsLambdaFastify(app);
 
-// Local testing
+// --- Local Development Server ---
 if (process.env.NODE_ENV === "test") {
   app.listen({ port: 5000 }, (err) => {
-    if (err) {
-      console.error("Error starting server:", err);
-    } else {
-      console.log("Server listening on http://localhost:5000");
-    }
+    if (err) console.error(err);
+    else console.log("Server listening on http://localhost:5000");
   });
 }
