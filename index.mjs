@@ -1,106 +1,153 @@
 import fastify from "fastify";
 import awsLambdaFastify from "@fastify/aws-lambda";
-import { getSignedUrl } from "@aws-sdk/cloudfront-signer";
+import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
 import fs from "fs";
 import dotenv from "dotenv";
+import axios from "axios";
 
 dotenv.config();
 
 const app = fastify({ logger: true });
 
-// CloudFront configuration from environment variables
-const CLOUDFRONT_DOMAIN = process.env.CLOUDFRONT_COUNTRIES_DOMAIN;
-const CLOUDFRONT_KEY_PAIR_ID = process.env.CLOUDFRONT_KEY_PAIR_ID;
-const PRIVATE_KEY_PATH = "./cloudfront-private-key.pem";
-const EXPIRES_IN_SECONDS = 60;
+// --- S3 Configuration for Country Data ---
+const S3_REGION = process.env.REGION;
+const COUNTRY_DATA_BUCKET = process.env.COUNTRY_CODE_BUCKET;
+const COUNTRY_DATA_KEY = process.env.COUNTRY_CODE_KEY;
 
-// Load private key for signing CloudFront URLs
-let privateKey;
-try {
-  privateKey = fs.readFileSync(PRIVATE_KEY_PATH, "utf8");
-} catch (error) {
+// Initialize S3 Client
+const s3Client = new S3Client({ region: S3_REGION });
+
+// Global variable to store country data once loaded
+let countryData = null;
+
+// --- Basic Sanity Checks for S3 Country Data Config ---
+if (!S3_REGION || !COUNTRY_DATA_BUCKET) {
   console.error(
-    `Error: Could not read private key from ${PRIVATE_KEY_PATH}.`,
-    error
+    "Missing S3 configuration for country data (REGION or COUNTRY_DATA_BUCKET)."
   );
-  if (process.env.NODE_ENV !== "production") process.exit(1);
-}
-
-// Environment variable validation
-if (!CLOUDFRONT_DOMAIN || !CLOUDFRONT_KEY_PAIR_ID || !privateKey) {
-  console.error("Missing CloudFront configuration environment variables.");
   process.exit(1);
 }
 
 /**
- * Generates a CloudFront Signed URL.
+ * Function to load country data from S3.
+ * This runs once during Lambda cold start.
  */
-const generateSignedCloudFrontUrl = (fileKey) => {
-  const cleanFileKey = fileKey.startsWith("/") ? fileKey.substring(1) : fileKey;
-  const resourceUrl = `${CLOUDFRONT_DOMAIN}/${cleanFileKey}`;
-  const expirationDate = new Date(Date.now() + EXPIRES_IN_SECONDS * 1000);
+const loadCountryDataFromS3 = async () => {
+  if (countryData) {
+    // Data already loaded, no need to fetch again
+    return;
+  }
 
   try {
-    return getSignedUrl({
-      url: resourceUrl,
-      dateLessThan: expirationDate.toISOString(),
-      keyPairId: CLOUDFRONT_KEY_PAIR_ID,
-      privateKey: privateKey,
+    const command = new GetObjectCommand({
+      Bucket: COUNTRY_DATA_BUCKET,
+      Key: COUNTRY_DATA_KEY,
     });
+    const response = await s3Client.send(command);
+    console.log(
+      `S3 response for ${COUNTRY_DATA_BUCKET}/${COUNTRY_DATA_KEY}:`,
+      response
+    );
+    // Check if the response is valid
+
+    // Read the stream and parse JSON
+    const data = await response.Body.transformToString();
+    console.log("S3 response data:", data);
+    // Parse the JSON data
+
+    countryData = JSON.parse(data);
+
+    console.log("Parsed country data:", countryData);
+    app.log.info("Country data loaded successfully from S3.");
   } catch (error) {
-    app.log.error("Error generating CloudFront signed URL:", error);
-    throw new Error("Failed to generate CloudFront signed URL.");
+    app.log.error(
+      `Failed to load country data from S3://${COUNTRY_DATA_BUCKET}/${COUNTRY_DATA_KEY}:`,
+      error
+    );
+    countryData = [];
   }
 };
 
-// --- API Routes ---
+// --- Call the data loading function immediately ---
+// This ensures it runs during the Lambda cold start phase.
+loadCountryDataFromS3();
 
-// Health check
+// --- New Endpoint for Geo-IP Lookup ---
+app.get("/geolocation", async (request, reply) => {
+  // Ensure country data is loaded before proceeding
+  if (!countryData) {
+    // Attempt to reload if it failed previously or was not initialized
+    await loadCountryDataFromS3();
+    if (!countryData) {
+      // If still null/empty after attempt, return an error
+      return reply.status(500).send({
+        error: "Country data not available",
+        message: "Failed to load country data from S3.",
+      });
+    }
+  }
+
+  const clientIp = request.headers["x-forwarded-for"] || request.ip;
+
+  try {
+    const geoResponse = await axios.get(`http://ip-api.com/json/${clientIp}`);
+    console.log(`GeoIP response for IP ${clientIp}:`, geoResponse.data);
+    const geoData = geoResponse.data;
+
+    if (geoData.status === "success" && geoData.countryCode) {
+      const detectedCountryCode = geoData.countryCode;
+
+      const countryInfo = countryData.find(
+        (country) => country.code === detectedCountryCode
+      );
+
+      if (countryInfo) {
+        return reply.status(200).send({
+          dial_code: countryInfo.dial_code,
+          country_code: countryInfo.code,
+          country_name: countryInfo.name,
+          flag: countryInfo.flag,
+        });
+      }
+    }
+
+    app.log.warn(
+      `Could not detect specific country for IP: ${clientIp}. GeoData:`,
+      geoData
+    );
+    return reply
+      .status(200)
+      .send({ dial_code: "+1", message: "Defaulting to +1" });
+  } catch (error) {
+    app.log.error(`Error detecting country code for IP: ${clientIp}`, error);
+    return reply
+      .status(500)
+      .send({ error: "Failed to detect country code", message: error.message });
+  }
+});
+
+// --- Existing Routes (minimal comments) ---
 app.get("/health", async (_, reply) =>
   reply.status(200).send({ message: "API is Healthy", status: "ok" })
 );
 
-// Root endpoint with API info
 app.get("/", async (request, reply) => {
   return {
-    message: "Welcome to the VBytes Language Dataset and Country Codes API",
+    message: "Welcome to the VBytes geolocation detection API",
     version: "1.0.0",
     routes: [
-      { method: "GET", path: "/health", description: "Health check" },
+      { method: "GET", path: "/geolocation", description: "Health check" },
       {
         method: "GET",
-        path: "/countries?file=file.json",
-        description: "Get country data",
+        path: "/detectcountry",
+        description: "Detect user's country code",
       },
     ],
   };
 });
 
-// Endpoint for country data
-app.get("/countries", async (request, reply) => {
-  const { file } = request.query;
-  if (!file)
-    return reply.status(400).send({ error: "Missing 'file' parameter" });
-
-  try {
-    const fileUrl = generateSignedCloudFrontUrl(file);
-    return reply.redirect(fileUrl, 302);
-  } catch (error) {
-    request.log.error(
-      `Error processing /countries request for file: ${file}`,
-      error
-    );
-    return reply.status(500).send({
-      error: `Failed to retrieve file URL for ${file}`,
-      message: error.message,
-    });
-  }
-});
-
-// --- AWS Lambda Handler ---
 export const handler = awsLambdaFastify(app);
 
-// --- Local Development Server ---
 if (process.env.NODE_ENV === "test") {
   app.listen({ port: 5000 }, (err) => {
     if (err) console.error(err);

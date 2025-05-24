@@ -23,6 +23,7 @@
     "@aws-sdk/cloudfront-signer": "^3.813.0",
     "@aws-sdk/s3-request-presigner": "^3.812.0",
     "@fastify/aws-lambda": "^5.1.4",
+    "axios": "^1.9.0",
     "dotenv": "^16.5.0",
     "fastify": "^5.3.3",
     "nodemon": "^3.1.10"
